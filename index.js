@@ -39,7 +39,7 @@ app.post("/availability", async (req, res) => {
   }
 });
 
-// 🔥 RESERVAR (EL IMPORTANTE)
+// RESERVAR (EL IMPORTANTE)
 app.post("/reservar", async (req, res) => {
   try {
     const { nombre, telefono, fecha, hora, personas } = req.body;
