@@ -1,4 +1,10 @@
 {
+  "name": "cayote-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.1",
     "cors": "^2.8.6",

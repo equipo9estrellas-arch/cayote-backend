@@ -1,5 +1,4 @@
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
@@ -13,89 +12,80 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-function add2h(hora) {
-  const [h, m] = hora.split(":").map(Number);
-  const date = new Date();
-  date.setHours(h + 2);
-  date.setMinutes(m);
-  return date.toTimeString().slice(0, 5);
-}
-
+// HEALTH CHECK
 app.get("/", (req, res) => {
   res.send("Servidor funcionando");
 });
 
+// 🔍 DISPONIBILIDAD
 app.post("/availability", async (req, res) => {
-  const { fecha, hora, personas } = req.body;
+  try {
+    const { fecha, hora, personas } = req.body;
 
-  const { data: mesas, error } = await supabase
-    .from("mesas")
-    .select("*")
-    .gte("capacidad", personas)
-    .order("capacidad", { ascending: true });
-
-  if (error) return res.status(500).json({ error });
-
-  const hora_fin = add2h(hora);
-
-  for (let mesa of mesas) {
-    const { data: reservas, error: errRes } = await supabase
-      .from("reservas")
+    const { data: mesas, error } = await supabase
+      .from("mesas")
       .select("*")
-      .eq("fecha", fecha)
-      .eq("mesa_id", mesa.id);
+      .gte("capacidad", personas);
 
-    if (errRes) continue;
+    if (error) throw error;
 
-    const conflicto = reservas.some(r =>
-      !(hora_fin <= r.hora_inicio || hora >= r.hora_fin)
-    );
-
-    if (!conflicto) {
-      return res.json({
-        disponible: true,
-        mesa_id: mesa.id
-      });
+    if (!mesas || mesas.length === 0) {
+      return res.json({ disponible: false });
     }
-  }
 
-  res.json({ disponible: false });
+    res.json({ disponible: true, mesa_id: mesas[0].id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post("/reserve", async (req, res) => {
-  const { nombre, telefono, fecha, hora, personas } = req.body;
+// 🔥 RESERVAR (EL IMPORTANTE)
+app.post("/reservar", async (req, res) => {
+  try {
+    const { nombre, telefono, fecha, hora, personas } = req.body;
 
-  const disponibilidad = await fetch("http://localhost:3000/availability", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fecha, hora, personas })
-  });
+    // 1. Buscar mesa disponible
+    const { data: mesas, error: errorMesas } = await supabase
+      .from("mesas")
+      .select("*")
+      .gte("capacidad", personas);
 
-  const data = await disponibilidad.json();
+    if (errorMesas) throw errorMesas;
 
-  if (!data.disponible) {
-    return res.json({ ok: false });
-  }
-
-  const hora_fin = add2h(hora);
-
-  const { error } = await supabase.from("reservas").insert([
-    {
-      nombre,
-      telefono,
-      fecha,
-      hora_inicio: hora,
-      hora_fin,
-      personas,
-      mesa_id: data.mesa_id
+    if (!mesas || mesas.length === 0) {
+      return res.json({ error: "No hay mesas disponibles" });
     }
-  ]);
 
-  if (error) return res.status(500).json({ error });
+    const mesa = mesas[0];
 
-  res.json({ ok: true });
+    // 2. Guardar reserva
+    const { error: errorReserva } = await supabase
+      .from("reservas")
+      .insert([
+        {
+          nombre,
+          telefono,
+          fecha,
+          hora,
+          personas,
+          mesa_id: mesa.id
+        }
+      ]);
+
+    if (errorReserva) throw errorReserva;
+
+    res.json({
+      success: true,
+      mensaje: "Reserva confirmada",
+      mesa_id: mesa.id
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
+// SERVER
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
