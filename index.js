@@ -135,61 +135,104 @@ app.post("/reservar", async (req, res) => {
   try {
     const { nombre, telefono, fecha, hora, personas } = req.body;
 
+    // convertir hora inicio
     const [h, m] = hora.split(":").map(Number);
-    const horaNueva = h * 60 + m;
+    const inicioNueva = h * 60 + m;
 
+    // duración fija 90 min
+    const finNueva = inicioNueva + 90;
+
+    // 1. obtener mesas
     const { data: mesas } = await supabase
       .from("mesas")
       .select("*")
-      .gte("capacidad", personas);
+      .order("capacidad", { ascending: false });
 
+    // 2. reservas del día
     const { data: reservas } = await supabase
       .from("reservas")
       .select("*")
-      .eq("fecha", fecha)
-      .eq("estado", "confirmada");
+      .eq("fecha", fecha);
 
-    for (const mesa of mesas) {
-      let conflicto = false;
+    // 3. relaciones mesas-reservas
+    const { data: reservasMesas } = await supabase
+      .from("reservas_mesas")
+      .select("*");
 
-      for (const r of reservas) {
-        if (r.mesa_id !== mesa.id) continue;
+    // 4. filtrar mesas libres
+    const mesasLibres = mesas.filter((mesa) => {
+      const rel = reservasMesas.filter(rm => rm.mesa_id === mesa.id);
 
-        const [rh, rm] = r.hora.split(":").map(Number);
-        const inicio = rh * 60 + rm;
-        const fin = inicio + (r.duracion_minutos || 90);
+      for (const r of rel) {
+        const reserva = reservas.find(res => res.id === r.reserva_id);
+        if (!reserva) continue;
 
-        if (horaNueva >= inicio && horaNueva < fin) {
-          conflicto = true;
-          break;
+        const [hi, mi] = reserva.hora_inicio.split(":").map(Number);
+        const inicio = hi * 60 + mi;
+
+        const [hf, mf] = reserva.hora_fin.split(":").map(Number);
+        const fin = hf * 60 + mf;
+
+        if (inicioNueva < fin && finNueva > inicio) {
+          return false;
         }
       }
 
-      if (!conflicto) {
-        const { error } = await supabase.from("reservas").insert([
-          {
-            nombre,
-            telefono,
-            fecha,
-            hora,
-            personas,
-            mesa_id: mesa.id,
-            estado: "confirmada",
-            duracion_minutos: 90,
-          },
-        ]);
+      return true;
+    });
 
-        if (error) throw error;
+    // 5. elegir mesas (multimesa)
+    let seleccion = [];
+    let capacidadTotal = 0;
 
-        return res.json({
-          success: true,
-          message: "Reserva confirmada",
-          mesa_id: mesa.id,
-        });
-      }
+    for (const mesa of mesasLibres) {
+      seleccion.push(mesa);
+      capacidadTotal += mesa.capacidad;
+
+      if (capacidadTotal >= personas) break;
     }
 
-    res.json({ error: "No hay mesas disponibles en ese horario" });
+    if (capacidadTotal < personas) {
+      return res.json({ error: "No hay capacidad suficiente" });
+    }
+
+    // 6. calcular hora_fin
+    const finHora = new Date(0,0,0,h,m);
+    finHora.setMinutes(finHora.getMinutes() + 90);
+
+    const hora_fin = finHora.toTimeString().slice(0,5);
+
+    // 7. crear reserva
+    const { data: nuevaReserva, error } = await supabase
+      .from("reservas")
+      .insert([
+        {
+          nombre,
+          telefono,
+          fecha,
+          hora_inicio: hora,
+          hora_fin,
+          personas
+        }
+      ])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // 8. insertar relación mesas
+    const inserts = seleccion.map(m => ({
+      reserva_id: nuevaReserva.id,
+      mesa_id: m.id
+    }));
+
+    await supabase.from("reservas_mesas").insert(inserts);
+
+    res.json({
+      success: true,
+      mesas: seleccion.map(m => m.nombre)
+    });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
