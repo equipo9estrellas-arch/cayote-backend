@@ -52,7 +52,32 @@ app.post("/availability", async (req, res) => {
 app.post("/reservar", async (req, res) => {
   try {
     const { nombre, telefono, fecha, hora, personas } = req.body;
+const dia = new Date(fecha).getDay();
 
+const horaNum = parseInt(hora.split(":")[0]);
+
+let permitido = false;
+
+if (dia === 1 || dia === 2) {
+  if (horaNum >= 20 && horaNum < 23) permitido = true;
+}
+
+if (dia >= 3 && dia <= 6) {
+  if (
+    (horaNum >= 13 && horaNum < 16) ||
+    (horaNum >= 20 && horaNum < 23)
+  ) permitido = true;
+}
+
+if (dia === 0) {
+  if (horaNum >= 13 && horaNum < 16) permitido = true;
+}
+
+if (!permitido) {
+  return res.status(400).json({
+    error: "Restaurante cerrado en ese horario",
+  });
+}
     const { data: mesas } = await supabase.from("mesas").select("*");
     const { data: reservas } = await supabase.from("reservas").select("*");
 
