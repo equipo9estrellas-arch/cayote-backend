@@ -51,7 +51,7 @@ app.post("/availability", async (req, res) => {
 // RESERVAR (simple y robusto)
 app.post("/reservar", async (req, res) => {
   try {
-    const { nombre, telefono, fecha, hora, personas } = req.body;
+const { nombre, telefono, fecha, hora, personas, alergias } = req.body;
 const dia = new Date(fecha).getDay();
 
 const horaNum = parseInt(hora.split(":")[0]);
@@ -156,4 +156,40 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log("Servidor activo en puerto " + PORT);
+});
+app.post("/disponibilidad", async (req, res) => {
+  try {
+    const { fecha, hora, personas } = req.body;
+
+    if (!fecha || !hora || !personas) {
+      return res.status(400).json({ error: "Faltan datos" });
+    }
+
+    const { data: mesas } = await supabase
+      .from("mesas")
+      .select("*");
+
+    const { data: reservas } = await supabase
+      .from("reservas")
+      .select("*")
+      .eq("fecha", fecha)
+      .eq("hora", hora);
+
+    const reservasHoy = reservas || [];
+
+    const mesasDisponibles = mesas.filter((mesa) => {
+      const ocupada = reservasHoy.some(
+        (r) => r.mesa_id === mesa.id
+      );
+      return !ocupada && mesa.capacidad >= personas;
+    });
+
+    return res.json({
+      disponible: mesasDisponibles.length > 0,
+      mesas_disponibles: mesasDisponibles.length
+    });
+
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
 });
