@@ -13,135 +13,215 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-// TEST
 app.get("/", (req, res) => {
   res.send("Servidor funcionando");
 });
 
-// RESERVAR (MULTIMESA + HORARIOS)
+// VER DISPONIBILIDAD (multi-mesa)
+app.post("/availability", async (req, res) => {
+  try {
+    const { fecha, hora, personas } = req.body;
+
+    const { data: mesas, error: errorMesas } = await supabase
+      .from("mesas")
+      .select("*");
+
+    if (errorMesas) throw errorMesas;
+
+    const { data: reservasRaw, error: errorReservas } = await supabase
+      .from("reservas_mesas")
+      .select(`
+        mesa_id,
+        reservas (
+          fecha,
+          hora_inicio,
+          hora_fin
+        )
+      `);
+
+    if (errorReservas) throw errorReservas;
+
+    const reservas = reservasRaw || [];
+
+    const mesasDisponibles = mesas.filter((mesa) => {
+      const ocupadas = reservas.filter(
+        (r) =>
+          r.mesa_id === mesa.id &&
+          r.reservas.fecha === fecha &&
+          hora >= r.reservas.hora_inicio &&
+          hora < r.reservas.hora_fin
+      );
+      return ocupadas.length === 0;
+    });
+
+    let capacidadTotal = 0;
+    let mesasAsignadas = [];
+
+    for (let mesa of mesasDisponibles) {
+      mesasAsignadas.push(mesa.id);
+      capacidadTotal += mesa.capacidad;
+
+      if (capacidadTotal >= personas) break;
+    }
+
+    if (capacidadTotal >= personas) {
+      return res.json({
+        disponible: true,
+        mesas: mesasAsignadas,
+      });
+    } else {
+      return res.json({
+        disponible: false,
+      });
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// RESERVAR (multi-mesa)
 app.post("/reservar", async (req, res) => {
   try {
     const { nombre, telefono, fecha, hora, personas } = req.body;
 
-    if (!nombre || !telefono || !fecha || !hora || !personas) {
-      return res.json({ error: "Faltan datos" });
-    }
+    const horaInicio = hora;
+    const horaFin = "23:00";
 
-    const fechaObj = new Date(fecha);
-    const dia = fechaObj.getDay();
-
-    const toMin = (h) => {
-      const [hh, mm] = h.split(":").map(Number);
-      return hh * 60 + mm;
-    };
-
-    const inicioNueva = toMin(hora);
-    const finNueva = inicioNueva + 90;
-
-    const horarios = {
-      1: [[20 * 60, 23 * 60]],
-      2: [[20 * 60, 23 * 60]],
-      3: [[13 * 60, 16 * 60], [20 * 60, 23 * 60]],
-      4: [[13 * 60, 16 * 60], [20 * 60, 23 * 60]],
-      5: [[13 * 60, 16 * 60], [20 * 60, 23 * 60]],
-      6: [[13 * 60, 16 * 60], [20 * 60, 23 * 60]],
-      0: [[13 * 60, 16 * 60]]
-    };
-
-    const turnos = horarios[dia] || [];
-
-    const dentroHorario = turnos.some(([inicio, fin]) => {
-      return inicioNueva >= inicio && finNueva <= fin;
-    });
-
-    if (!dentroHorario) {
-      return res.json({ error: "Fuera del horario del restaurante" });
-    }
-
-    const { data: mesas } = await supabase
+    // 1. Obtener mesas
+    const { data: mesas, error: errorMesas } = await supabase
       .from("mesas")
-      .select("*")
-      .order("capacidad", { ascending: false });
-
-    const { data: reservas } = await supabase
-      .from("reservas")
-      .select("*")
-      .eq("fecha", fecha);
-
-    const { data: reservasMesas } = await supabase
-      .from("reservas_mesas")
       .select("*");
 
-    const mesasLibres = mesas.filter((mesa) => {
-      const relaciones = reservasMesas.filter(r => r.mesa_id === mesa.id);
+    if (errorMesas) throw errorMesas;
 
-      for (const rel of relaciones) {
-        const reserva = reservas.find(r => r.id === rel.reserva_id);
-        if (!reserva) continue;
+    // 2. Obtener reservas existentes
+    const { data: reservasRaw, error: errorReservas } = await supabase
+      .from("reservas_mesas")
+      .select(`
+        mesa_id,
+        reservas (
+          fecha,
+          hora_inicio,
+          hora_fin
+        )
+      `);
 
-        const inicio = toMin(reserva.hora_inicio);
-        const fin = toMin(reserva.hora_fin);
+    if (errorReservas) throw errorReservas;
 
-        if (inicioNueva < fin && finNueva > inicio) {
-          return false;
-        }
-      }
+    const reservas = reservasRaw || [];
 
-      return true;
+    // 3. Filtrar mesas disponibles
+    const mesasDisponibles = mesas.filter((mesa) => {
+      const ocupadas = reservas.filter(
+        (r) =>
+          r.mesa_id === mesa.id &&
+          r.reservas.fecha === fecha &&
+          hora >= r.reservas.hora_inicio &&
+          hora < r.reservas.hora_fin
+      );
+      return ocupadas.length === 0;
     });
 
-    let seleccion = [];
+    // 4. Seleccionar mesas necesarias
     let capacidadTotal = 0;
+    let mesasAsignadas = [];
 
-    for (const mesa of mesasLibres) {
-      seleccion.push(mesa);
+    for (let mesa of mesasDisponibles) {
+      mesasAsignadas.push(mesa.id);
       capacidadTotal += mesa.capacidad;
 
       if (capacidadTotal >= personas) break;
     }
 
     if (capacidadTotal < personas) {
-      return res.json({ error: "No hay capacidad suficiente" });
+      return res.status(400).json({ error: "No hay suficiente capacidad" });
     }
 
-    const finDate = new Date(0, 0, 0, 0, inicioNueva + 90);
-    const hora_fin = finDate.toTimeString().slice(0, 5);
-
-    const { data: nuevaReserva, error } = await supabase
+    // 5. Crear reserva principal
+    const { data: reserva, error: errorInsert } = await supabase
       .from("reservas")
       .insert([
         {
           nombre,
           telefono,
           fecha,
-          hora_inicio: hora,
-          hora_fin,
-          personas
-        }
+          hora_inicio: horaInicio,
+          hora_fin: horaFin,
+          personas,
+        },
       ])
       .select()
       .single();
 
-    if (error) throw error;
+    if (errorInsert) throw errorInsert;
 
-    const inserts = seleccion.map(m => ({
-      reserva_id: nuevaReserva.id,
-      mesa_id: m.id
+    // 6. Relacionar mesas
+    const inserts = mesasAsignadas.map((mesa_id) => ({
+      reserva_id: reserva.id,
+      mesa_id,
     }));
 
-    await supabase.from("reservas_mesas").insert(inserts);
+    const { error: errorRelacion } = await supabase
+      .from("reservas_mesas")
+      .insert(inserts);
 
-    res.json({
+    if (errorRelacion) throw errorRelacion;
+
+    return res.json({
       success: true,
-      mesas: seleccion.map(m => m.nombre)
+      reserva_id: reserva.id,
+      mesas: mesasAsignadas,
     });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// SERVER
+// ESTADO DE MESAS
+app.post("/estado-mesas", async (req, res) => {
+  try {
+    const { fecha, hora } = req.body;
+
+    const { data: mesas } = await supabase.from("mesas").select("*");
+
+    const { data: reservasRaw } = await supabase
+      .from("reservas_mesas")
+      .select(`
+        mesa_id,
+        reservas (
+          fecha,
+          hora_inicio,
+          hora_fin
+        )
+      `);
+
+    const reservas = reservasRaw || [];
+
+    const estado = mesas.map((mesa) => {
+      const ocupada = reservas.some(
+        (r) =>
+          r.mesa_id === mesa.id &&
+          r.reservas.fecha === fecha &&
+          hora >= r.reservas.hora_inicio &&
+          hora < r.reservas.hora_fin
+      );
+
+      return {
+        mesa_id: mesa.id,
+        capacidad: mesa.capacidad,
+        ocupada,
+      };
+    });
+
+    res.json(estado);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
