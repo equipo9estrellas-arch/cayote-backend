@@ -1,4 +1,5 @@
 require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
@@ -17,69 +18,178 @@ app.get("/", (req, res) => {
   res.send("Servidor funcionando");
 });
 
-// 🔍 DISPONIBILIDAD
-app.post("/availability", async (req, res) => {
+// OBTENER MESAS
+app.get("/mesas", async (req, res) => {
+  const { data, error } = await supabase.from("mesas").select("*");
+  if (error) return res.status(500).json({ error });
+  res.json(data);
+});
+
+// LISTAR RESERVAS
+app.get("/reservas", async (req, res) => {
+  const { data, error } = await supabase
+    .from("reservas")
+    .select("*")
+    .order("hora", { ascending: true });
+
+  if (error) return res.status(500).json({ error });
+  res.json(data);
+});
+
+// ESTADO DE MESAS (CLAVE PARA FRONTEND)
+app.post("/estado-mesas", async (req, res) => {
   try {
-    const { fecha, hora, personas } = req.body;
+    const { fecha, hora } = req.body;
 
-    const { data: mesas, error } = await supabase
-      .from("mesas")
+    const [h, m] = hora.split(":").map(Number);
+    const horaActual = h * 60 + m;
+
+    const { data: reservas } = await supabase
+      .from("reservas")
       .select("*")
-      .gte("capacidad", personas);
+      .eq("fecha", fecha)
+      .eq("estado", "confirmada");
 
-    if (error) throw error;
+    const { data: mesas } = await supabase.from("mesas").select("*");
 
-    if (!mesas || mesas.length === 0) {
-      return res.json({ disponible: false });
-    }
+    const resultado = mesas.map((mesa) => {
+      let ocupada = false;
 
-    res.json({ disponible: true, mesa_id: mesas[0].id });
+      for (const r of reservas) {
+        if (r.mesa_id !== mesa.id) continue;
+
+        const [rh, rm] = r.hora.split(":").map(Number);
+        const inicio = rh * 60 + rm;
+        const fin = inicio + (r.duracion_minutos || 90);
+
+        if (horaActual >= inicio && horaActual < fin) {
+          ocupada = true;
+          break;
+        }
+      }
+
+      return {
+        mesa_id: mesa.id,
+        capacidad: mesa.capacidad,
+        ocupada,
+      };
+    });
+
+    res.json(resultado);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// RESERVAR (EL IMPORTANTE)
-app.post("/reservar", async (req, res) => {
+// DISPONIBILIDAD
+app.post("/availability", async (req, res) => {
   try {
-    const { nombre, telefono, fecha, hora, personas } = req.body;
+    const { fecha, hora, personas } = req.body;
 
-    // 1. Buscar mesa disponible
-    const { data: mesas, error: errorMesas } = await supabase
+    const [h, m] = hora.split(":").map(Number);
+    const horaActual = h * 60 + m;
+
+    const { data: mesas } = await supabase
       .from("mesas")
       .select("*")
       .gte("capacidad", personas);
 
-    if (errorMesas) throw errorMesas;
+    const { data: reservas } = await supabase
+      .from("reservas")
+      .select("*")
+      .eq("fecha", fecha)
+      .eq("estado", "confirmada");
 
-    if (!mesas || mesas.length === 0) {
-      return res.json({ error: "No hay mesas disponibles" });
+    for (const mesa of mesas) {
+      let ocupada = false;
+
+      for (const r of reservas) {
+        if (r.mesa_id !== mesa.id) continue;
+
+        const [rh, rm] = r.hora.split(":").map(Number);
+        const inicio = rh * 60 + rm;
+        const fin = inicio + (r.duracion_minutos || 90);
+
+        if (horaActual >= inicio && horaActual < fin) {
+          ocupada = true;
+          break;
+        }
+      }
+
+      if (!ocupada) {
+        return res.json({
+          disponible: true,
+          mesa_id: mesa.id,
+        });
+      }
     }
 
-    const mesa = mesas[0];
+    res.json({ disponible: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    // 2. Guardar reserva
-    const { error: errorReserva } = await supabase
+// RESERVAR (ANTI-OVERBOOKING REAL)
+app.post("/reservar", async (req, res) => {
+  try {
+    const { nombre, telefono, fecha, hora, personas } = req.body;
+
+    const [h, m] = hora.split(":").map(Number);
+    const horaNueva = h * 60 + m;
+
+    const { data: mesas } = await supabase
+      .from("mesas")
+      .select("*")
+      .gte("capacidad", personas);
+
+    const { data: reservas } = await supabase
       .from("reservas")
-      .insert([
-        {
-          nombre,
-          telefono,
-          fecha,
-          hora,
-          personas,
-          mesa_id: mesa.id
+      .select("*")
+      .eq("fecha", fecha)
+      .eq("estado", "confirmada");
+
+    for (const mesa of mesas) {
+      let conflicto = false;
+
+      for (const r of reservas) {
+        if (r.mesa_id !== mesa.id) continue;
+
+        const [rh, rm] = r.hora.split(":").map(Number);
+        const inicio = rh * 60 + rm;
+        const fin = inicio + (r.duracion_minutos || 90);
+
+        if (horaNueva >= inicio && horaNueva < fin) {
+          conflicto = true;
+          break;
         }
-      ]);
+      }
 
-    if (errorReserva) throw errorReserva;
+      if (!conflicto) {
+        const { error } = await supabase.from("reservas").insert([
+          {
+            nombre,
+            telefono,
+            fecha,
+            hora,
+            personas,
+            mesa_id: mesa.id,
+            estado: "confirmada",
+            duracion_minutos: 90,
+          },
+        ]);
 
-    res.json({
-      success: true,
-      mensaje: "Reserva confirmada",
-      mesa_id: mesa.id
-    });
+        if (error) throw error;
 
+        return res.json({
+          success: true,
+          message: "Reserva confirmada",
+          mesa_id: mesa.id,
+        });
+      }
+    }
+
+    res.json({ error: "No hay mesas disponibles en ese horario" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
