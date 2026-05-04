@@ -51,77 +51,89 @@ app.post("/availability", async (req, res) => {
 // RESERVAR (simple y robusto)
 app.post("/reservar", async (req, res) => {
   try {
-const { nombre, telefono, fecha, hora, personas, alergias } = req.body;
-const dia = new Date(fecha).getDay();
+    const { nombre, telefono, fecha, hora, personas, alergias } = req.body;
 
-const horaNum = parseInt(hora.split(":")[0]);
+    if (!nombre || !telefono || !fecha || !hora || !personas) {
+      return res.status(400).json({ error: "Faltan datos" });
+    }
 
-let permitido = false;
-
-if (dia === 1 || dia === 2) {
-  if (horaNum >= 20 && horaNum < 23) permitido = true;
-}
-
-if (dia >= 3 && dia <= 6) {
-  if (
-    (horaNum >= 13 && horaNum < 16) ||
-    (horaNum >= 20 && horaNum < 23)
-  ) permitido = true;
-}
-
-if (dia === 0) {
-  if (horaNum >= 13 && horaNum < 16) permitido = true;
-}
-
-if (!permitido) {
-  return res.status(400).json({
-    error: "Restaurante cerrado en ese horario",
-  });
-}
+    // Obtener mesas
     const { data: mesas } = await supabase.from("mesas").select("*");
-    const { data: reservas } = await supabase.from("reservas").select("*");
 
-    const reservasHoy = (reservas || []).filter(
-      (r) => r.fecha === fecha && r.hora === hora
-    );
+    // Obtener reservas del mismo día
+    const { data: reservas } = await supabase
+      .from("reservas")
+      .select("*")
+      .eq("fecha", fecha);
 
-    const mesasDisponibles = mesas.filter((mesa) => {
-      const ocupada = reservasHoy.some((r) => r.mesa_id === mesa.id);
+    const reservasHoy = reservas || [];
+
+    // Buscar mesa disponible en esa hora
+    const mesaDisponible = mesas.find((mesa) => {
+      const ocupada = reservasHoy.some(
+        (r) => r.mesa_id === mesa.id && r.hora === hora
+      );
       return !ocupada && mesa.capacidad >= personas;
     });
 
-    if (mesasDisponibles.length === 0) {
-      return res.status(400).json({ error: "No hay mesas disponibles" });
-    }
-
-    const mesaAsignada = mesasDisponibles[0];
-
-    const { data, error } = await supabase
-      .from("reservas")
-      .insert([
+    // SI HAY MESA → RESERVAR
+    if (mesaDisponible) {
+      const { data, error } = await supabase.from("reservas").insert([
         {
           nombre,
           telefono,
           fecha,
           hora,
           personas,
-          mesa_id: mesaAsignada.id,
+          alergias: alergias || "ninguna",
+          mesa_id: mesaDisponible.id,
         },
-      ])
-      .select();
+      ]);
 
-    if (error) throw error;
+      if (error) throw error;
+
+      return res.json({ success: true });
+    }
+
+    // SI NO HAY → BUSCAR ALTERNATIVAS
+    const alternativas = [];
+    const horas = [
+      "13:00",
+      "13:30",
+      "14:00",
+      "14:30",
+      "20:00",
+      "20:30",
+      "21:00",
+      "21:30",
+      "22:00",
+    ];
+
+    for (let h of horas) {
+      const disponible = mesas.find((mesa) => {
+        const ocupada = reservasHoy.some(
+          (r) => r.mesa_id === mesa.id && r.hora === h
+        );
+        return !ocupada && mesa.capacidad >= personas;
+      });
+
+      if (disponible) {
+        alternativas.push(h);
+      }
+
+      if (alternativas.length >= 3) break;
+    }
 
     return res.json({
-      success: true,
-      mesa: mesaAsignada.id,
+      success: false,
+      disponible: false,
+      alternativas,
     });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
-
 // ESTADO DE MESAS (para frontend tipo Restoo)
 app.post("/estado-mesas", async (req, res) => {
   try {
