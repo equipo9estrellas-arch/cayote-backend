@@ -13,6 +13,29 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
+// Helper: normaliza teléfonos a formato E.164 (lo que GHL exige)
+function normalizarTelefono(tel) {
+  if (!tel) return "";
+  const limpio = String(tel).replace(/[\s\-()]/g, "");
+  if (limpio.startsWith("+")) return limpio;
+  if (limpio.startsWith("00")) return "+" + limpio.slice(2);
+  if (/^\d{9}$/.test(limpio)) return "+34" + limpio; // España por defecto
+  return limpio;
+}
+
+// Helper: dispara webhook a GoHighLevel sin bloquear la respuesta
+function enviarWebhookGHL(payload) {
+  if (!process.env.GHL_WEBHOOK_URL) return;
+
+  fetch(process.env.GHL_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((r) => console.log("[GHL] webhook status:", r.status))
+    .catch((err) => console.error("[GHL] webhook error:", err.message));
+}
+
 app.get("/", (req, res) => {
   res.send("Servidor funcionando");
 });
@@ -78,7 +101,7 @@ app.post("/reservar", async (req, res) => {
 
     // SI HAY MESA → RESERVAR
     if (mesaDisponible) {
-      const { data, error } = await supabase.from("reservas").insert([
+      const { error } = await supabase.from("reservas").insert([
         {
           nombre,
           telefono,
@@ -92,7 +115,20 @@ app.post("/reservar", async (req, res) => {
 
       if (error) throw error;
 
-      return res.json({ success: true });
+      // Disparar webhook a GHL — fire and forget
+      enviarWebhookGHL({
+        nombre,
+        telefono: normalizarTelefono(telefono),
+        fecha,
+        hora,
+        personas,
+        alergias: (alergias && alergias.trim()) || "ninguna",
+        mesa_id: mesaDisponible.id,
+        fuente: "agente_voz_vapi",
+        timestamp: new Date().toISOString(),
+      });
+
+      return res.json({ success: true, mesa_id: mesaDisponible.id });
     }
 
     // SI NO HAY → BUSCAR ALTERNATIVAS
@@ -129,11 +165,11 @@ app.post("/reservar", async (req, res) => {
       disponible: false,
       alternativas,
     });
-
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
 });
+
 // ESTADO DE MESAS (para frontend tipo Restoo)
 app.post("/estado-mesas", async (req, res) => {
   try {
@@ -164,11 +200,7 @@ app.post("/estado-mesas", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("Servidor activo en puerto " + PORT);
-});
+// DISPONIBILIDAD (endpoint legacy/duplicado de /availability)
 app.post("/disponibilidad", async (req, res) => {
   try {
     const { fecha, hora, personas } = req.body;
@@ -177,9 +209,7 @@ app.post("/disponibilidad", async (req, res) => {
       return res.status(400).json({ error: "Faltan datos" });
     }
 
-    const { data: mesas } = await supabase
-      .from("mesas")
-      .select("*");
+    const { data: mesas } = await supabase.from("mesas").select("*");
 
     const { data: reservas } = await supabase
       .from("reservas")
@@ -190,18 +220,21 @@ app.post("/disponibilidad", async (req, res) => {
     const reservasHoy = reservas || [];
 
     const mesasDisponibles = mesas.filter((mesa) => {
-      const ocupada = reservasHoy.some(
-        (r) => r.mesa_id === mesa.id
-      );
+      const ocupada = reservasHoy.some((r) => r.mesa_id === mesa.id);
       return !ocupada && mesa.capacidad >= personas;
     });
 
     return res.json({
       disponible: mesasDisponibles.length > 0,
-      mesas_disponibles: mesasDisponibles.length
+      mesas_disponibles: mesasDisponibles.length,
     });
-
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("Servidor activo en puerto " + PORT);
 });
