@@ -238,3 +238,19 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Servidor activo en puerto " + PORT);
 });
+// LISTAR TODAS LAS RESERVAS (para el frontend)
+app.get("/reservas", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("reservas")
+      .select("*")
+      .order("fecha", { ascending: false })
+      .order("hora", { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
